@@ -638,7 +638,6 @@ sub c_read_mailbox ($$$$$$) {
 	my $domain;
 	#split $user if it contains an @
 	if (index($user, '@') != -1) {
-    		debug( "\$user contains '@'\n");
 		my @values = split('@', $user);
 		$user=$values[0];
 		$domain = $values[1];
