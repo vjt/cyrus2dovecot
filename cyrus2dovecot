@@ -1,13 +1,11 @@
 #!/usr/bin/env perl
 #
-# $Id: cyrus2dovecot,v 1.3 2012/11/10 09:52:33 alex Exp $
+# $Id: cyrus2dovecot,v 1.2 2008/09/24 09:52:33 holger Exp $
 #
 # Convert Cyrus folders to Dovecot.
 #
 # Written by Holger Weiss <holger@ZEDAT.FU-Berlin.DE> at Freie Universitaet
 # Berlin, Germany, Zentraleinrichtung fuer Datenverarbeitung (ZEDAT).
-#
-# Edited by Alex @ Gosign
 #
 # ------------------------------------------------------------------------------
 # Copyright (c) 2008 Freie Universitaet Berlin.
@@ -57,7 +55,7 @@ my %DEFAULT = (
 	default_quota => 0,             # Use this quota as a fallback.
 	cyrus_unixhierarchysep => 0,    # replace . in username with ^
 	dump_meta => 0,                 # Print the metadata structure?
-	debug => 0,                     # Print debug output?
+	debug => 1,                     # Print debug output?
 	quiet => 0,                     # Suppress the standard output?
 	edit_foldernames => []          # List of folder name substitutions.
 );
@@ -635,14 +633,30 @@ sub c_read_mailbox ($$$$$$) {
 	# 6.3.6.).  While at it, we check whether a folder exist before adding
 	# it to the list in order to straighten the subscriptions up.
 	#
+	my $domain;
+	#split $user if it contains an @
+	if (index($user, '@') != -1) {
+    		debug( "\$user contains '@'\n");
+		my @values = split('@', $user);
+		$user=$values[0];
+		$domain = $values[1];
+	}
+
+
 	foreach my $folder (keys %{ $meta->{box} }) {
 		$folder =~ s/\//./g;
 		$existing{$folder} = 1;
 	}
 	foreach my $folder (keys %{ c_read_skiplist($subfile) }) {
-		$folder =~ s/^user\.$user$/INBOX/;
-		$folder =~ s/^user\.[^\.]+\.(.+)$/$1/;
-		$folder =~ s/\//./g;	# Probably not necessary.
+		if (defined($domain)){
+			$folder =~ s/^$domain!user\.$user$/INBOX/;
+			$folder =~ s/^$domain!user\.[^\.]+\.(.+)$/$1/;
+			$folder =~ s/\//./g;	# Probably not necessary.
+		}else{
+			$folder =~ s/^user\.$user$/INBOX/;
+			$folder =~ s/^user\.[^\.]+\.(.+)$/$1/;
+			$folder =~ s/\//./g;	# Probably not necessary.
+		}
 		push(@subscriptions, $folder) if $existing{$folder};
 	}
 	$meta->{subscriptions} = \@subscriptions;
@@ -1666,5 +1680,5 @@ FITNESS FOR A PARTICULAR PURPOSE.
 	Revision 1.1  2008/09/22 08:36:44  holger
 	Initial release.
 
-	Revision 1.3 2012/11/11 midnight	alex
+	Revision 1.2 2012/11/11 midnight	alex
 	added basic virtual domain support and unixhirarchiesep
