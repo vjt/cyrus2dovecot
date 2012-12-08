@@ -1,6 +1,6 @@
 #!/usr/bin/env perl
 #
-# $Id: cyrus2dovecot,v 1.4 2012/12/06 11:40:33 holger Exp $
+# $Id: cyrus2dovecot,v 1.5 2008/09/24 01:26:00 Alex Exp $
 #
 # Convert Cyrus folders to Dovecot.
 #
@@ -49,6 +49,7 @@ my %DEFAULT = (
 	cyrus_inbox => '/var/spool/imap/user/%u',
 	cyrus_sub => '/var/imap/user/%h/%u.sub',
 	cyrus_seen => '/var/imap/user/%h/%u.seen',
+	cyrus_sieve => undef,
 	cyrus_quota => undef,
 	cyrus_quota_format => 1,        # Cyrus quota format (1 for legacy).
 	dovecot_uidlist_format => 3,    # Create this dovecot-uidlist format.
@@ -74,6 +75,7 @@ my %DEFAULT = (
 #
 #    	$meta->{subscriptions} = [ 'ac', 'ac/dc' ]
 #    	     ->{quota} = 2147483648
+#	     ->{sieve} = <text>
 #    	     ->{box}->{'INBOX'}->{uidvalidity} = 1107601073
 #    	                       ->{uidnext} = 3
 #    	                       ->{nonrecent} = 2	# Last non-recent UID.
@@ -124,7 +126,7 @@ sub slurp ($);
 sub fixpath ($@);
 sub c_fulldirhash ($);
 sub c_read_skiplist ($);
-sub c_read_mailbox ($$$$$$);
+sub c_read_mailbox ($$$$$$$);
 sub d_write_mailbox ($$$);
 
 #
@@ -175,6 +177,7 @@ GetOptions(
 	'cyrus_quota|cyrus-quota|Q=s',
 	'cyrus_quota_format|cyrus-quota-format|O=i',
 	'cyrus_seen|cyrus-seen|S=s',
+	'cyrus_sieve|cyrus-sieve|I=s',
 	'cyrus_sub|cyrus-sub|U=s',
 	'dovecot_host|dovecot-host|H=s',
 	'dovecot_inbox|dovecot-inbox|D=s',
@@ -229,6 +232,7 @@ sub main () {
 		my $cyrus_seen = $CONF{cyrus_seen};
 		my $cyrus_sub = $CONF{cyrus_sub};
 		my $cyrus_quota = $CONF{cyrus_quota};
+		my $cyrus_sieve = $CONF{cyrus_sieve};
 
 		debug("Converting the e-mail folders of $user.");
 
@@ -241,10 +245,14 @@ sub main () {
 		    $cyrus_sub);
 		fixpath($user, $cyrus_quota)
 		    if ($CONF{cyrus_quota} and $CONF{cyrus_quota_format} == 1);
+		fixpath($user, $cyrus_sieve)
+		    if ($CONF{cyrus_sieve});
+		debug('SievePath:',$cyrus_sieve)
+		    if ($CONF{cyrus_sieve});
 
 		# Do the actual conversion.
 		c_read_mailbox($meta, $user, $cyrus_inbox, $cyrus_seen,
-		    $cyrus_sub, $cyrus_quota);
+		    $cyrus_sub, $cyrus_quota,$cyrus_sieve);
 		
 		debug('Cyrus Inbox:',$cyrus_inbox);
 		debug('Dovecot Inbox:',$dovecot_inbox);
@@ -617,8 +625,8 @@ sub c_read_skiplist ($) {
 # Read all global and folder-specific metadata of a user into the given data
 # structure.  Die on error.
 #
-sub c_read_mailbox ($$$$$$) {
-	my ($meta, $user, $rootdir, $seenfile, $subfile, $quotafile) = @_;
+sub c_read_mailbox ($$$$$$$) {
+	my ($meta, $user, $rootdir, $seenfile, $subfile, $quotafile, $sievefile) = @_;
 	my (%existing, @subscriptions);
 	my $seendata = ($seenfile eq 'cyrus.seen') ? undef :
 	    c_read_skiplist($seenfile);
@@ -638,6 +646,7 @@ sub c_read_mailbox ($$$$$$) {
 	my $domain;
 	#split $user if it contains an @
 	if (index($user, '@') != -1) {
+    		debug( "\$user contains '\@'\n");
 		my @values = split('@', $user);
 		$user=$values[0];
 		$domain = $values[1];
@@ -685,6 +694,16 @@ sub c_read_mailbox ($$$$$$) {
 		$meta->{quota} = $CONF{default_quota} || 0;
 	}
 	debug('Quota:', $meta->{quota});
+
+	#
+	# Save sieve rules from the specified sieve file
+	#
+	if ($sievefile) {
+			$meta->{sieve} = _c_read_sieve($sievefile);
+		warning('No sieve information available.')
+		    if (not $meta->{sieve});
+	}
+
 	debug('Done reading Cyrus metadata.');
 }
 
@@ -968,6 +987,30 @@ sub _c_read_legacy_quota ($) {
 	debug('Done reading:', $file);
 	return $quota[1];
 }
+#
+# Read a sieve file and return content of the file
+# or undef if the specified file does not exist.  Die on error.
+#
+sub _c_read_sieve ($) {
+	my $file = shift;
+
+	if (not -e $file) {
+		debug('Sieve file does not exist:', $file);
+		return undef;
+	}
+
+	debug('Reading:', $file);
+	open(my $handle, '<', $file) or error("Cannot open $file: $!");
+	my $sieve = join("", <$handle>);
+	close($handle) or error("Cannot close $file: $!");
+#	chomp(@sieve);
+
+#	error("Cannot parse $file: Not in legacy quota format")
+#	    if (@quota != 2 or $quota[1] !~ /^\d+$/);
+#	debug('Done reading:', $file);
+	debug('Done reading:',$file);
+	return $sieve;
+}
 
 #
 # Read a skiplist string and return the string or undef if the string's length
@@ -1237,6 +1280,8 @@ sub d_write_mailbox ($$$) {
 		$FOLDERS++;
 	}
 	_d_write_subscriptions($meta->{subscriptions}, $d_rootdir);
+	_d_write_sieve($meta->{sieve}, $d_rootdir)
+		if($meta->{sieve});
 	_d_write_maildirsize($d_rootdir, $meta->{quota}) if $meta->{quota};
 	debug('Done writing Dovecot folders.');
 }
@@ -1313,6 +1358,27 @@ sub _d_write_subscriptions ($$) {
 	}
 	close($handle) or error("Cannot close $file: $!");
 	debug('Done writing:', $file);
+}
+#
+# Write the sieve file.  Die on error.
+#
+sub _d_write_sieve ($$) {
+	my ($sieve, $rootdir) = @_;
+	my $file = "$rootdir/sieve/phpscript.sieve";
+	
+	#make sure sieve dir exists
+	unless(-d "$rootdir/sieve"){
+ 	   mkdir("$rootdir/sieve") or die;
+	}
+
+	debug('Writing:', $file);
+	open(my $handle, '>', $file) or error("Cannot open $file: $!");
+		print $handle "$sieve"
+		    or error("Cannot write $file: $!");
+		debug('Sieve written:', $sieve);
+	close($handle) or error("Cannot close $file: $!");
+	debug('Done writing:', $file);
+	symlink("sieve/phpscript.sieve","$rootdir/.dovecot.sieve") or error("Cannot create sieve simlink $file: $!");
 }
 
 #
@@ -1681,9 +1747,11 @@ FITNESS FOR A PARTICULAR PURPOSE.
 	Revision 1.1  2008/09/22 08:36:44  holger
 	Initial release.
 
-	Revision 1.3 2012/11/11 midnight	alex
-	added basic virtual domain support and unixhirarchiesep
-	
-	Revision 1.4 2012/12/06 midnight  alex
-	Fixed subscriptions for virtual domains
+        Revision 1.3 2012/11/11 midnight        alex
+        added basic virtual domain support and unixhirarchiesep
 
+        Revision 1.4 2012/12/06 midnight  alex
+        Fixed subscriptions for virtual domains
+
+	Revision 1.5 2012/12/08 01:26:00 alex
+	added support for sieve rules
