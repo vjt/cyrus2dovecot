@@ -1366,9 +1366,12 @@ sub _d_write_sieve ($$) {
 	my ($sieve, $rootdir) = @_;
 	my $file = "$rootdir/sieve/phpscript.sieve";
 	
-	#make sure sieve dir exists
+	#make sure sieve dirs exists
 	unless(-d "$rootdir/sieve"){
  	   mkdir("$rootdir/sieve") or die;
+	}
+	unless(-d "$rootdir/sieve/tmp"){
+ 	   mkdir("$rootdir/sieve/tmp") or die;
 	}
 
 	debug('Writing:', $file);
