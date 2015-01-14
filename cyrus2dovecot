@@ -1,6 +1,6 @@
 #!/usr/bin/env perl
 #
-# $Id: cyrus2dovecot,v 1.5 2008/09/24 01:26:00 Alex Exp $
+# $Id: cyrus2dovecot,v 1.6 2015/01/14 22:41:00 a-schild $
 #
 # Convert Cyrus folders to Dovecot.
 #
@@ -8,6 +8,7 @@
 # Berlin, Germany, Zentraleinrichtung fuer Datenverarbeitung (ZEDAT).
 #
 # Edited by Alex @ Gosign
+# Edited by Andre @ Schild.ws
 #
 # ------------------------------------------------------------------------------
 # Copyright (c) 2008 Freie Universitaet Berlin.
@@ -168,7 +169,7 @@ our $VERSION = sprintf('%d.%d (%04d-%02d-%02d)', q$Revision: 1.2 $ =~ /(\d+)/g,
     q$Date: 2008/09/24 09:52:33 $ =~ /(\d{4})\/(\d{2})\/(\d{2})/);
 
 my $MYSELF = basename($0);
-my ($FOLDERS, $MAILS, $SIZE, $USER, $FROM_STDIN, $QUOTADATA, %CONF);
+my ($FOLDERS, $MAILS, $SIZE, $USER, $FROM_STDIN, $QUOTADATA, $EXPUNGED, %CONF);
 
 GetOptions(
 	\%CONF,
@@ -238,7 +239,7 @@ sub main () {
 
 		# (Re)set "global" variables.
 		$USER = $user;
-		$FOLDERS = $MAILS = $SIZE = 0;
+		$FOLDERS = $MAILS = $SIZE = $EXPUNGED = 0;
 
 		# Resolve "%u", "%h", "x", and "%<n>u" within pathnames.
 		fixpath($user, $dovecot_inbox, $cyrus_inbox, $cyrus_seen,
@@ -261,8 +262,8 @@ sub main () {
 
 		# Give some feedback.
 		print Dumper($meta) if $CONF{dump_meta};
-		info(sprintf('%u messages in %u folders (%.1f MiB, %u s)',
-		    $MAILS, $FOLDERS, $SIZE / 1024 / 1024, time - $start))
+		info(sprintf('%u messages in %u folders (%.1f MiB, %u s), %u expunged mails skipped',
+		    $MAILS, $FOLDERS, $SIZE / 1024 / 1024, time - $start, $EXPUNGED))
 		    unless $CONF{quiet};
 
 		debug("Done converting the e-mail folders of $user.");
@@ -450,6 +451,8 @@ sub fixpath ($@) {
 sub _c_read_folders ($$$$);
 sub _c_read_header ($);
 sub _c_read_index ($);
+sub _c_read_expunge ($);
+sub _c_read_index_format ($);
 sub _c_read_old_seen ($);
 sub _c_read_legacy_quota ($);
 sub _c_read_skiplist_item ($$);
@@ -720,7 +723,7 @@ sub _c_read_folders ($$$$) {
 	debug ('Seendata: ',$seendata); 
 
 	my $box = ($boxpath eq $rootdir) ? 'INBOX' : $boxpath;
-	my ($mailfolder, $index, $seen);
+	my ($mailfolder, $index, $expunge, $seen);
 
 	#
 	# Currently, we wouldn't be able to distinguish user.foo.INBOX from
@@ -740,6 +743,7 @@ sub _c_read_folders ($$$$) {
 		# Collect this folder's metadata.
 		my $header = _c_read_header($boxpath);
 		$index = _c_read_index($boxpath);
+		$expunge = _c_read_expunge($boxpath);
 		$header->{folderuid} = _c_make_uid($index->{uidvalidity}, $box)
 		    if not $header->{folderuid};
 		$seen = defined($seendata) ?
@@ -773,7 +777,7 @@ sub _c_read_folders ($$$$) {
 	opendir(my $handle, $boxpath) or error("Cannot open $boxpath: $!");
 	while (my $file = readdir($handle)) {
 		next if $file =~ /^\.\.?$/;
-		next if $file =~ /^cyrus\.(?:header|index|cache|seen)$/;
+		next if $file =~ /^cyrus\.(?:header|index|expunge|cache|seen|squat)$/;
 		my $path = "$boxpath/$file";
 
 		if (-d $path) {
@@ -783,6 +787,12 @@ sub _c_read_folders ($$$$) {
 			my $uid = $1;
 			my $attr;
 
+			if ($expunge->{$uid}) {
+				debug("Message is expunged $uid");
+				$attr->{expunged} = 1;
+			}
+			else
+			{
 			if ($index->{$uid}) {
 				# Save the e-mail's flags and its INTERNALDATE.
 				debug("Saving attributes of: $box/$file");
@@ -790,6 +800,7 @@ sub _c_read_folders ($$$$) {
 				$attr->{sysflags} = $index->{$uid}->{sysflags};
 				$attr->{internaldate} =
 				    $index->{$uid}->{internaldate};
+					$attr->{expunged} = 0;
 			} else {
 				my @statlist = stat($path);
 
@@ -800,6 +811,7 @@ sub _c_read_folders ($$$$) {
 				$attr->{usrflags} = 0;
 				$attr->{sysflags} = 0;
 				$attr->{internaldate} = $statlist[9];
+			}
 			}
 			$attr->{sysflags} |= FLAG_SEEN if _c_seen($uid, $seen);
 			$meta->{box}->{$box}->{mail}->{$uid} = $attr;
@@ -878,70 +890,89 @@ sub _c_read_header ($) {
 sub _c_read_index ($) {
 	my $boxpath = shift;
 	my $file = "$boxpath/cyrus.index";
+	return _c_read_index_format($file);
+}
+
+sub _c_read_expunge ($) {
+	my $boxpath = shift;
+	my $file = "$boxpath/cyrus.expunge";
+	return _c_read_index_format($file);
+}
+
+
+sub _c_read_index_format ($) {
+	my $file = shift;
 	my ($data, $buf, $n);
 
 	debug('Reading:', $file);
-	open(my $handle, '<', $file) or error("Cannot open $file: $!");
+	if (-e "$file")
+	{
+            open(my $handle, '<', $file) or error("Cannot open $file: $!");
 
-	# Read and save the interesting header fields.
-	seek($handle, 8, SEEK_SET) or error('Cannot seek in:', $file);
+            # Read and save the interesting header fields.
+            seek($handle, 8, SEEK_SET) or error('Cannot seek in:', $file);
 
-	my $version = readint($file, $handle);
-	my $headersize = readint($file, $handle);
-	my $recordsize = readint($file, $handle);
+            my $version = readint($file, $handle);
+            my $headersize = readint($file, $handle);
+            my $recordsize = readint($file, $handle);
 
-	debug('Index format version:', $version);
+            debug('Index format version:', $version);
 
-	seek($handle, 8, SEEK_CUR) or error('Cannot seek in:', $file);
-	$data->{lastuid} = readint($file, $handle);
+            seek($handle, 8, SEEK_CUR) or error('Cannot seek in:', $file);
+            $data->{lastuid} = readint($file, $handle);
 
-	# Skip 4 additional bytes for 64-bit quotas in Cyrus 2.2 and newer.
-	seek($handle, ($version < 6) ? 8 : 12, SEEK_CUR)
-	    or error('Cannot seek in:', $file);
-	$data->{uidvalidity} = readint($file, $handle);
+            # Skip 4 additional bytes for 64-bit quotas in Cyrus 2.2 and newer.
+            seek($handle, ($version < 6) ? 8 : 12, SEEK_CUR)
+                or error('Cannot seek in:', $file);
+            $data->{uidvalidity} = readint($file, $handle);
 
-	#
-	# As we try to parse future index file formats (i.e., we don't bail out
-	# if the $version is unknown), we do at least a dumb consistency check:
-	# Cyrus sets the UIDVALIDITY of a folder to its creation date, so let's
-	# make sure its value is >= 600000000 (1989-01-05 11:40:00).
-	#
-	error("Cannot parse $file: UIDVALIDITY is", $data->{uidvalidity})
-	    if $data->{uidvalidity} < 600000000;
+            #
+            # As we try to parse future index file formats (i.e., we don't bail out
+            # if the $version is unknown), we do at least a dumb consistency check:
+            # Cyrus sets the UIDVALIDITY of a folder to its creation date, so let's
+            # make sure its value is >= 600000000 (1989-01-05 11:40:00).
+            #
+            error("Cannot parse $file: UIDVALIDITY is", $data->{uidvalidity})
+                if $data->{uidvalidity} < 600000000;
 
-	seek($handle, $headersize, SEEK_SET) or error('Cannot seek in:', $file);
+            seek($handle, $headersize, SEEK_SET) or error('Cannot seek in:', $file);
 
-	# Read and save the interesting fields of all records.
-	while ($n = read($handle, $buf, 4)) {
-		error("Read $n instead of 4 bytes from $file.") if $n != 4;
-		my $uid = unpack('N', $buf);
+            # Read and save the interesting fields of all records.
+            while ($n = read($handle, $buf, 4)) {
+                    error("Read $n instead of 4 bytes from $file.") if $n != 4;
+                    my $uid = unpack('N', $buf);
 
-		debug('Reading index record for message UID:', $uid);
+                    debug('Reading index record for message UID:', $uid);
 
-		# Read, save, and "check" (see above) the INTERNALDATE.
-		$data->{$uid}->{internaldate} = readint($file, $handle);
-		error("Cannot parse $file: INTERNALDATE is",
-		    $data->{$uid}->{internaldate})
-		    if $data->{$uid}->{internaldate} < 600000000;
+                    # Read, save, and "check" (see above) the INTERNALDATE.
+                    $data->{$uid}->{internaldate} = readint($file, $handle);
+                    error("Cannot parse $file: INTERNALDATE is",
+                        $data->{$uid}->{internaldate})
+                        if $data->{$uid}->{internaldate} < 600000000;
 
-		#
-		# Read and save the system and user flags.  Note that the size
-		# of the user flags bitmask is MAX_USER_FLAGS / 32.  At least in
-		# Cyrus 2.2.12, MAX_USER_FLAGS is 128 by default, so we'll read
-		# 4 bytes.  If this is ever changed, the number of bytes to skip
-		# at the end of this loop (currently $recordsize - 40) must be
-		# adjusted accordingly.
-		#
-		seek($handle, 24, SEEK_CUR) or error('Cannot seek in:', $file);
-		$data->{$uid}->{sysflags} = readint($file, $handle);
-		$data->{$uid}->{usrflags} = readint($file, $handle);
+                    #
+                    # Read and save the system and user flags.  Note that the size
+                    # of the user flags bitmask is MAX_USER_FLAGS / 32.  At least in
+                    # Cyrus 2.2.12, MAX_USER_FLAGS is 128 by default, so we'll read
+                    # 4 bytes.  If this is ever changed, the number of bytes to skip
+                    # at the end of this loop (currently $recordsize - 40) must be
+                    # adjusted accordingly.
+                    #
+                    seek($handle, 24, SEEK_CUR) or error('Cannot seek in:', $file);
+                    $data->{$uid}->{sysflags} = readint($file, $handle);
+                    $data->{$uid}->{usrflags} = readint($file, $handle);
 
-		# Skip the rest of the record.
-		seek($handle, $recordsize - 40, SEEK_CUR)
-		    or error('Cannot seek in:', $file);
+                    # Skip the rest of the record.
+                    seek($handle, $recordsize - 40, SEEK_CUR)
+                        or error('Cannot seek in:', $file);
+            }
+            close($handle) or error("Cannot close $file: $!");
+            debug('Done reading:', $file);
 	}
-	close($handle) or error("Cannot close $file: $!");
-	debug('Done reading:', $file);
+	else
+	{
+	    debug('Dont copy, expunged file:', $file);
+	}
 	return $data;
 }
 
@@ -1207,73 +1238,78 @@ sub d_write_mailbox ($$$) {
 			my $c_mailpath = "$c_boxpath/$uid.";
 			my $d_temppath = "$d_boxpath/tmp/$MYSELF.$$.$MAILS";
 
-			# Convert the e-mail.
-			open(my $cfh, '<', $c_mailpath)
-			    or error("Cannot open $c_mailpath: $!");
-			open(my $dfh, '>', $d_temppath)
-			    or error("Cannot open $d_temppath: $!");
-			while (<$cfh>) {
-				s/\r\n/\n/ unless $CONF{dovecot_crlf};
-				print $dfh $_
-				    or error("Cannot write $d_temppath: $!");
-			}
-			close($cfh) or error("Cannot close $c_mailpath: $!");
-			close($dfh) or error("Cannot close $d_temppath: $!");
-
-			#
-			# Create the Maildir++ e-mail filename.  Include the
-			# size fields used by Dovecot:
-			#
-			# | ,S=<size>: <size> contains the file size.  Getting
-			# | the size from the filename avoids doing a stat(),
-			# | which may improve the performance.  This is
-			# | especially useful with Maildir++ quota.
-			# |
-			# | ,W=<vsize>: <vsize> contains the file's RFC822.SIZE,
-			# | i.e. the file size with linefeeds being CR+LF
-			# | characters.  If the message was stored with CR+LF
-			# | linefeeds, <size> and <vsize> are the same.  Setting
-			# | this may give a small speedup because now Dovecot
-			# | doesn't need to calculate the size itself.
-			#
-			# [ http://wiki.dovecot.org/MailboxFormat/Maildir ]
-			#
-			my @c_stat = stat($c_mailpath);
-			my @d_stat = stat($d_temppath);
-
-			error('Cannot stat(2) message file:', $c_mailpath)
-			    if not defined($c_stat[7]);
-			error('Cannot stat(2) message file:', $d_temppath)
-			    if not defined($d_stat[7]);
-
 			my $attr = $box->{mail}->{$uid};
-			my $size = $d_stat[7];	# File size with LF.
-			my $vsize = $c_stat[7];	# File size with CR+LF.
-			my $subdir = ($uid > $box->{nonrecent}) ? 'new' : 'cur';
-			my $d_mail = _d_create_filename($attr, $size, $vsize,
-			    $#{ $box->{keywords} });
-			my $d_mailpath = "$d_boxpath/$subdir/$d_mail";
-
-			error("Cannot rename $d_temppath to: $d_mailpath")
-			    if not rename($d_temppath, $d_mailpath);
-
-			# Set the e-mail's last access and modification times.
-			utime($attr->{internaldate}, $attr->{internaldate},
-			    $d_mailpath);
-
-			# Add the e-mail to the dovecot-uidlist.
-			if ($CONF{dovecot_uidlist_format} == 1) {
-				print $ufh "$uid $d_mail\n"
-				    or error("Cannot write $uidfile: $!");
-			} elsif ($CONF{dovecot_uidlist_format} == 3) {
-				print $ufh "$uid :$d_mail\n"
-				    or error("Cannot write $uidfile: $!");
+			if ($attr->{expunged}) {
+				debug("$c_mailpath is expunged");
+				$EXPUNGED++;
 			} else {
-				error('Unknown dovecot-uidlist format:',
-				    $CONF{dovecot_uidlist_format});
-			}
-			$SIZE += $size;
-			$MAILS++;
+                            # Convert the e-mail.
+                            open(my $cfh, '<', $c_mailpath)
+                                or error("Cannot open $c_mailpath: $!");
+                            open(my $dfh, '>', $d_temppath)
+                                or error("Cannot open $d_temppath: $!");
+                            while (<$cfh>) {
+                                    s/\r\n/\n/ unless $CONF{dovecot_crlf};
+                                    print $dfh $_
+                                        or error("Cannot write $d_temppath: $!");
+                            }
+                            close($cfh) or error("Cannot close $c_mailpath: $!");
+                            close($dfh) or error("Cannot close $d_temppath: $!");
+
+                            #
+                            # Create the Maildir++ e-mail filename.  Include the
+                            # size fields used by Dovecot:
+                            #
+                            # | ,S=<size>: <size> contains the file size.  Getting
+                            # | the size from the filename avoids doing a stat(),
+                            # | which may improve the performance.  This is
+                            # | especially useful with Maildir++ quota.
+                            # |
+                            # | ,W=<vsize>: <vsize> contains the file's RFC822.SIZE,
+                            # | i.e. the file size with linefeeds being CR+LF
+                            # | characters.  If the message was stored with CR+LF
+                            # | linefeeds, <size> and <vsize> are the same.  Setting
+                            # | this may give a small speedup because now Dovecot
+                            # | doesn't need to calculate the size itself.
+                            #
+                            # [ http://wiki.dovecot.org/MailboxFormat/Maildir ]
+                            #
+                            my @c_stat = stat($c_mailpath);
+                            my @d_stat = stat($d_temppath);
+
+                            error('Cannot stat(2) message file:', $c_mailpath)
+                                if not defined($c_stat[7]);
+                            error('Cannot stat(2) message file:', $d_temppath)
+                                if not defined($d_stat[7]);
+
+                            my $size = $d_stat[7];	# File size with LF.
+                            my $vsize = $c_stat[7];	# File size with CR+LF.
+                            my $subdir = ($uid > $box->{nonrecent}) ? 'new' : 'cur';
+                            my $d_mail = _d_create_filename($attr, $size, $vsize,
+                                $#{ $box->{keywords} });
+                            my $d_mailpath = "$d_boxpath/$subdir/$d_mail";
+
+                            error("Cannot rename $d_temppath to: $d_mailpath")
+                                if not rename($d_temppath, $d_mailpath);
+
+                            # Set the e-mail's last access and modification times.
+                            utime($attr->{internaldate}, $attr->{internaldate},
+                                $d_mailpath);
+
+                            # Add the e-mail to the dovecot-uidlist.
+                            if ($CONF{dovecot_uidlist_format} == 1) {
+                                    print $ufh "$uid $d_mail\n"
+                                        or error("Cannot write $uidfile: $!");
+                            } elsif ($CONF{dovecot_uidlist_format} == 3) {
+                                    print $ufh "$uid :$d_mail\n"
+                                        or error("Cannot write $uidfile: $!");
+                            } else {
+                                    error('Unknown dovecot-uidlist format:',
+                                        $CONF{dovecot_uidlist_format});
+                            }
+                            $SIZE += $size;
+                            $MAILS++;
+                        }
 		}
 		close($ufh) or error("Cannot close $uidfile: $!");
 		_d_write_keywords($box->{keywords}, $d_boxpath);
@@ -1467,6 +1503,7 @@ conversion.  The generated e-mail filenames include the Maildir++
 extensions C<S=E<lt>sizeE<gt>> and C<W=E<lt>vsizeE<gt>> (which are used
 by Dovecot for better performance).  Optionally, Maildir++
 F<maildirsize> files are created.
+Expunged messages of the cyrus message store are not migrated to dovecot.
 
 =head1 OPTIONS
 
@@ -1764,3 +1801,6 @@ FITNESS FOR A PARTICULAR PURPOSE.
 
 	Revision 1.5 2012/12/08 01:26:00 alex
 	added support for sieve rules
+
+	Revision 1.6 2015/01/14 22:40:00 a-schild
+	added support for delayed expunge (Don't copy expunged messages)
