@@ -1476,8 +1476,14 @@ replaced by the I<n>'th character of that I<user> name, any occurrence
 of C<%h> will be replaced by Cyrus' directory "hash" character for that
 I<user> name (i.e., C<%h> is equivalent to C<%1u> if the first character
 of the I<user> name is a lowercase letter), and any occurrence of C<%x>
-will be replaced by Cyrus' "fulldirhash" character for that I<user>
-name.  However, within the specified B<--cyrus-quota> I<PATH> (if any),
+will be replaced by Cyrus' "fulldirhash" character for that I<user> name.
+When you have virtual domains in your cyrus installation then these 
+additional substitutes can be made:
+%d will be replaced by the domain part of the username
+%U is the user part of the username
+%g is the first character of the domain
+
+However, within the specified B<--cyrus-quota> I<PATH> (if any),
 these replacements will only be done if the B<--cyrus-quota-format>
 I<VERSION> is set to C<1>.
 
