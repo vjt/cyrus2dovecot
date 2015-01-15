@@ -1,6 +1,6 @@
 #!/usr/bin/env perl
 #
-# $Id: cyrus2dovecot,v 1.6 2015/01/14 22:41:00 a-schild $
+# $Id: cyrus2dovecot,v 1.7 2015/01/15 10:53:00 a-schild $
 #
 # Convert Cyrus folders to Dovecot.
 #
@@ -41,7 +41,8 @@ use Sys::Hostname;
 # first character of the user name is a lowercase letter), and any occurrence of
 # "%x" will be replaced by Cyrus' "fulldirhash" character for that user name.
 # "%d" will be replaced by the domain part of the username. %U is the user part
-# of the username. %g is the first character of the domain
+# of the username, %P is the userpart of the username with all ^replaced by dots.
+# %g is the first character of the domain
 #
 # See "perldoc cyrus2dovecot" for details.
 #
@@ -399,6 +400,7 @@ sub slurp ($) {
 # arguments directly (as opposed to returning the new pathnames).
 #
 # AP: Added %U (Username only) %d (domainname) %g (first letter of domain) 
+# AS: Added %P (Username only, all ^replaced by . )
 #
 sub fixpath ($@) {
 	my $user = shift;
@@ -439,9 +441,12 @@ sub fixpath ($@) {
 
 		if($domain) #user has a domain part, we should use it
 		{
+			my $duserDot = $duser;
+			$duserDot =~ s/\^/\./g;
 			s/%d/$domain/g;
         	        s/%g/$dhash/g;
 			s/%U/$duser/g;
+			s/%P/$duserDot/g;
 		}
 	}
 }
@@ -1804,3 +1809,6 @@ FITNESS FOR A PARTICULAR PURPOSE.
 
 	Revision 1.6 2015/01/14 22:40:00 a-schild
 	added support for delayed expunge (Don't copy expunged messages)
+
+	Revision 1.7 2015/01/15 10:54:00 a-schild
+	allow ^ characters in domain user names be remapped to the normal dot
