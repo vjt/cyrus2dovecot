@@ -32,8 +32,8 @@ OPTIONS
     Cyrus' "fulldirhash" character for that *user* name. When you have
     virtual domains in your cyrus installation then these additional
     substitutes can be made: %d will be replaced by the domain part of the
-    username %U is the user part of the username %g is the first character
-    of the domain
+    username %U is the user part of the username, %P is the userpart of the
+    username with all ^replaced by dots. %g is the first character of the domain
 
     However, within the specified --cyrus-quota *PATH* (if any), these
     replacements will only be done if the --cyrus-quota-format *VERSION* is
