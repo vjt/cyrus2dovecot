@@ -5,7 +5,8 @@ SYNOPSIS
     cyrus2dovecot [-cdmq] [-C *cyrus-inbox*] [-D *dovecot-inbox*]
     [-E *edit-foldernames*] [-F *dovecot-uidlist-format*]
     [-H *dovecot-host*] [-N *default-quota*] [-O *cyrus-quota-format*]
-    [-Q *cyrus-quota*] [-S *cyrus-seen*] [-U *cyrus-sub*] [*user* ...]
+    [-Q *cyrus-quota*] [-S *cyrus-seen*] [-U *cyrus-sub*] 
+    [--sieve-only] [*user* ...]
 
     cyrus2dovecot -h | -v
 
@@ -121,6 +122,10 @@ OPTIONS
             Use this *PATH* to the *user*'s seen database file in Cyrus. If
             cyrus.seen is specified as the *PATH*, cyrus2dovecot expects an
             old-style cyrus.seen file in every Cyrus folder.
+
+    --sieve-only
+            Only migrate sieve script(s), but no messages or quota
+            Can be used when messages have been migrated with another tool
 
     -U, --cyrus-sub=*PATH*
             Use this *PATH* to the *user*'s subscription database file in
@@ -289,4 +294,10 @@ HISTORY
 
             Revision 1.6 2015/01/14 22:40:00 a-schild
             added support for delayed expunge (Don't copy expunged messages)
+
+            Revision 1.7 2015/01/15 10:54:00 a-schild
+            allow ^ characters in domain user names be remapped to the normal dot
+
+            Revision 1.8 2016/06/24 10:54:00 a-schild
+            Added --sieve-only argument to only migrate sieve scripts
 

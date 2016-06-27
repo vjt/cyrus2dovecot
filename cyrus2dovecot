@@ -1,6 +1,6 @@
 #!/usr/bin/env perl
 #
-# $Id: cyrus2dovecot,v 1.7 2015/01/15 10:53:00 a-schild $
+# $Id: cyrus2dovecot,v 1.8 2016/06/23 18:15:00 a-schild $
 #
 # Convert Cyrus folders to Dovecot.
 #
@@ -60,6 +60,7 @@ my %DEFAULT = (
 	default_quota => 0,             # Use this quota as a fallback.
 	cyrus_unixhierarchysep => 0,    # replace . in username with ^
 	dump_meta => 0,                 # Print the metadata structure?
+	sieve_only => 0,                # When set to 1 only convert sieve scripts
 	debug => 0,                     # Print debug output?
 	quiet => 0,                     # Suppress the standard output?
 	edit_foldernames => []          # List of folder name substitutions.
@@ -128,8 +129,8 @@ sub slurp ($);
 sub fixpath ($@);
 sub c_fulldirhash ($);
 sub c_read_skiplist ($);
-sub c_read_mailbox ($$$$$$$);
-sub d_write_mailbox ($$$);
+sub c_read_mailbox ($$$$$$$$);
+sub d_write_mailbox ($$$$);
 
 #
 # IMAP flags.
@@ -188,6 +189,7 @@ GetOptions(
 	'dovecot_crlf|dovecot-crlf|c',
 	'dump_meta|dump-meta|m',
 	'cyrus_unixhierarchysep|cyrus-unixhierarchysep|u',
+	'sieve_only|sieve-only',
 	'debug|d',
 	'quiet|q',
 	'h',
@@ -235,8 +237,21 @@ sub main () {
 		my $cyrus_sub = $CONF{cyrus_sub};
 		my $cyrus_quota = $CONF{cyrus_quota};
 		my $cyrus_sieve = $CONF{cyrus_sieve};
+		my $sieve_only = $CONF{sieve_only};
 
 		debug("Converting the e-mail folders of $user.");
+		if ($sieve_only)
+		{
+			if ($cyrus_sieve)
+			{
+				debug("Converting only the sieve folders of $user. $sieve_only");
+			}
+			else
+			{
+				fatal("Requested only sieve conversion, but no cyrus_sieve folder specified");
+				die;
+			}
+		}
 
 		# (Re)set "global" variables.
 		$USER = $user;
@@ -254,12 +269,12 @@ sub main () {
 
 		# Do the actual conversion.
 		c_read_mailbox($meta, $user, $cyrus_inbox, $cyrus_seen,
-		    $cyrus_sub, $cyrus_quota,$cyrus_sieve);
+		    $cyrus_sub, $cyrus_quota,$cyrus_sieve, $sieve_only);
 		
 		debug('Cyrus Inbox:',$cyrus_inbox);
 		debug('Dovecot Inbox:',$dovecot_inbox);
 		
-		d_write_mailbox($meta, $cyrus_inbox, $dovecot_inbox);
+		d_write_mailbox($meta, $cyrus_inbox, $dovecot_inbox, $sieve_only);
 
 		# Give some feedback.
 		print Dumper($meta) if $CONF{dump_meta};
@@ -633,76 +648,78 @@ sub c_read_skiplist ($) {
 # Read all global and folder-specific metadata of a user into the given data
 # structure.  Die on error.
 #
-sub c_read_mailbox ($$$$$$$) {
-	my ($meta, $user, $rootdir, $seenfile, $subfile, $quotafile, $sievefile) = @_;
+sub c_read_mailbox ($$$$$$$$) {
+	my ($meta, $user, $rootdir, $seenfile, $subfile, $quotafile, $sievefile, $sieve_only) = @_;
 	my (%existing, @subscriptions);
-	my $seendata = ($seenfile eq 'cyrus.seen') ? undef :
-	    c_read_skiplist($seenfile);
+	if (!$sieve_only)
+	{
+		my $seendata = ($seenfile eq 'cyrus.seen') ? undef :
+		      c_read_skiplist($seenfile);
 
-	debug('Reading Cyrus metadata.');
-	_c_read_folders($meta, $rootdir, $rootdir, $seendata);
+		debug('Reading Cyrus metadata.');
+		_c_read_folders($meta, $rootdir, $rootdir, $seendata);
 
-	#
-	# Cyrus' subscription skiplist keys are in the form "user.<name>.<box>",
-	# where <name> is the user name and <box> the name of the subscribed
-	# folder.  We only save the latter (or "INBOX" for "user.<name>").  Note
-	# that the subscription skiplist values are empty.  Cyrus doesn't clean
-	# up subscriptions of folders which no longer exist (as per RFC 3501,
-	# 6.3.6.).  While at it, we check whether a folder exist before adding
-	# it to the list in order to straighten the subscriptions up.
-	#
-	my $domain;
-	#split $user if it contains an @
-	if (index($user, '@') != -1) {
-    		debug( "\$user contains '\@'\n");
-		my @values = split('@', $user);
-		$user=$values[0];
-		$domain = $values[1];
-	}
-
-
-	foreach my $folder (keys %{ $meta->{box} }) {
-		$folder =~ s/\//./g;
-		$existing{$folder} = 1;
-	}
-	foreach my $folder (keys %{ c_read_skiplist($subfile) }) {
-		if (defined($domain)){
-			$folder =~ s/^$domain!user\.$user$/INBOX/;
-			$folder =~ s/^$domain!user\.[^\.]+\.(.+)$/$1/;
-			$folder =~ s/\//./g;	# Probably not necessary.
-		}else{
-			$folder =~ s/^user\.$user$/INBOX/;
-			$folder =~ s/^user\.[^\.]+\.(.+)$/$1/;
-			$folder =~ s/\//./g;	# Probably not necessary.
+		#
+		# Cyrus' subscription skiplist keys are in the form "user.<name>.<box>",
+		# where <name> is the user name and <box> the name of the subscribed
+		# folder.  We only save the latter (or "INBOX" for "user.<name>").  Note
+		# that the subscription skiplist values are empty.  Cyrus doesn't clean
+		# up subscriptions of folders which no longer exist (as per RFC 3501,
+		# 6.3.6.).  While at it, we check whether a folder exist before adding
+		# it to the list in order to straighten the subscriptions up.
+		#
+		my $domain;
+		#split $user if it contains an @
+		if (index($user, '@') != -1) {
+			debug( "\$user contains '\@'\n");
+			my @values = split('@', $user);
+			$user=$values[0];
+			$domain = $values[1];
 		}
-		push(@subscriptions, $folder) if $existing{$folder};
-	}
-	$meta->{subscriptions} = \@subscriptions;
-	debug('Subscribed folders:', @subscriptions);
 
-	#
-	# Save the user's quota limit, either from Cyrus or using the specified
-	# default quota.
-	#
-	if ($quotafile) {
-		if ($CONF{cyrus_quota_format} == 1) {
-			$meta->{quota} = _c_read_legacy_quota($quotafile);
-		} elsif (defined($QUOTADATA->{"user.$user"})) {
-			$meta->{quota} = $QUOTADATA->{"user.$user"};
-			$meta->{quota} =~ s/^\d+\s+(\d+)$/$1/;
-			error('Cannot parse quota:', $QUOTADATA->{"user.$user"})
-			    if $meta->{quota} !~ /^\d+$/;
+
+		foreach my $folder (keys %{ $meta->{box} }) {
+			$folder =~ s/\//./g;
+			$existing{$folder} = 1;
 		}
-		warning('No quota information available.')
-		    if (not $meta->{quota} and not $CONF{default_quota});
-	}
-	if ($meta->{quota}) {
-		$meta->{quota} *= 1024;	# Kilobytes to bytes,
-	} else {
-		$meta->{quota} = $CONF{default_quota} || 0;
-	}
-	debug('Quota:', $meta->{quota});
+		foreach my $folder (keys %{ c_read_skiplist($subfile) }) {
+			if (defined($domain)){
+				$folder =~ s/^$domain!user\.$user$/INBOX/;
+				$folder =~ s/^$domain!user\.[^\.]+\.(.+)$/$1/;
+				$folder =~ s/\//./g;	# Probably not necessary.
+			}else{
+				$folder =~ s/^user\.$user$/INBOX/;
+				$folder =~ s/^user\.[^\.]+\.(.+)$/$1/;
+				$folder =~ s/\//./g;	# Probably not necessary.
+			}
+			push(@subscriptions, $folder) if $existing{$folder};
+		}
+		$meta->{subscriptions} = \@subscriptions;
+		debug('Subscribed folders:', @subscriptions);
 
+		#
+		# Save the user's quota limit, either from Cyrus or using the specified
+		# default quota.
+		#
+		if ($quotafile) {
+			if ($CONF{cyrus_quota_format} == 1) {
+				$meta->{quota} = _c_read_legacy_quota($quotafile);
+			} elsif (defined($QUOTADATA->{"user.$user"})) {
+				$meta->{quota} = $QUOTADATA->{"user.$user"};
+				$meta->{quota} =~ s/^\d+\s+(\d+)$/$1/;
+				error('Cannot parse quota:', $QUOTADATA->{"user.$user"})
+				    if $meta->{quota} !~ /^\d+$/;
+			}
+			warning('No quota information available.')
+			    if (not $meta->{quota} and not $CONF{default_quota});
+		}
+		if ($meta->{quota}) {
+			$meta->{quota} *= 1024;	# Kilobytes to bytes,
+		} else {
+			$meta->{quota} = $CONF{default_quota} || 0;
+		}
+		debug('Quota:', $meta->{quota});
+	}
 	#
 	# Save sieve rules from the specified sieve file
 	#
@@ -1174,156 +1191,161 @@ sub _d_create_filename ($$$$);
 # Create the Maildir++ folder including all subfolders, write the metadata, and
 # convert the actual e-mails.
 #
-sub d_write_mailbox ($$$) {
-	my ($meta, $c_rootdir, $d_rootdir) = @_;
+sub d_write_mailbox ($$$$) {
+	my ($meta, $c_rootdir, $d_rootdir, $sieve_only) = @_;
+	if (!$sieve_only)
+	{
+		#
+		# The Maildir++ filenames we create include a random number.  We call
+		# srand(3) in order to re-create the same filenames if the conversion
+		# is repeated for some reason.
+		#
+		srand($meta->{box}->{'INBOX'}->{uidvalidity});
 
-	#
-	# The Maildir++ filenames we create include a random number.  We call
-	# srand(3) in order to re-create the same filenames if the conversion
-	# is repeated for some reason.
-	#
-	srand($meta->{box}->{'INBOX'}->{uidvalidity});
+		debug('Writing Dovecot folders.');
+		foreach my $c_box (keys %{ $meta->{box} }) {
+			my ($c_boxpath, $d_boxpath);
+			my $d_box = $c_box;
 
-	debug('Writing Dovecot folders.');
-	foreach my $c_box (keys %{ $meta->{box} }) {
-		my ($c_boxpath, $d_boxpath);
-		my $d_box = $c_box;
+	#		debug('c_boxpath:',$c_boxpath);
+			debug('d_box:',$d_box);
+			debug('c_box:',$c_box);
+			debug('c_rootidr:',$c_rootdir);
 
-#		debug('c_boxpath:',$c_boxpath);
-		debug('d_box:',$d_box);
-		debug('c_box:',$c_box);
-		debug('c_rootidr:',$c_rootdir);
-
-		if ($d_box eq 'INBOX') {
-			$c_boxpath = $c_rootdir;
-		} else {
-			$c_boxpath = "$c_rootdir/$c_box";
-			$d_box =~ s/\//./g;
-			$d_box = ".$d_box";
-		}
-
-		# Edit the Maildir++ folder name if desired.
-		foreach my $operation (@{ $CONF{edit_foldernames} }) {
-			debug("Editing folder name $d_box: $operation");
-			my $r = eval("\$d_box =~ $operation");
-			error("Cannot evaluate $operation: $@") if $@;
-			error("Cannot evaluate $operation.") if not defined($r);
-			debug('New folder name:', $d_box);
-		}
-
-		$d_boxpath = ($d_box eq 'INBOX') ?
-		    $d_rootdir : "$d_rootdir/$d_box";
-
-		# Create an empty Maildir.
-		debug('New folder name:', $d_boxpath);
-		_d_make_maildir($d_boxpath);
-		_d_touch_maildirfolder($d_boxpath) unless $d_box eq 'INBOX';
-
-		my $box = $meta->{box}->{$c_box};
-		my $uidfile = "$d_boxpath/dovecot-uidlist";
-
-		# Open the dovecot-uidlist file.
-		open(my $ufh, '>', $uidfile)
-		    or error("Cannot open $uidfile: $!");
-
-		# Write the dovecot-uidlist header line.
-		if ($CONF{dovecot_uidlist_format} == 1) {
-			print $ufh "1 $box->{uidvalidity} $box->{uidnext}\n"
-			    or error("Cannot write $uidfile: $!");
-		} elsif ($CONF{dovecot_uidlist_format} == 3) {
-			print $ufh "3 V$box->{uidvalidity} N$box->{uidnext}\n"
-			    or error("Cannot write $uidfile: $!");
-		} else {
-			error('Unknown dovecot-uidlist format:',
-			    $CONF{dovecot_uidlist_format});
-		}
-
-		# Handle all e-mails in this folder.
-		foreach my $uid (sort {$a <=> $b} keys %{ $box->{mail} }) {
-			my $c_mailpath = "$c_boxpath/$uid.";
-			my $d_temppath = "$d_boxpath/tmp/$MYSELF.$$.$MAILS";
-
-			my $attr = $box->{mail}->{$uid};
-			if ($attr->{expunged}) {
-				debug("$c_mailpath is expunged");
-				$EXPUNGED++;
+			if ($d_box eq 'INBOX') {
+				$c_boxpath = $c_rootdir;
 			} else {
-                            # Convert the e-mail.
-                            open(my $cfh, '<', $c_mailpath)
-                                or error("Cannot open $c_mailpath: $!");
-                            open(my $dfh, '>', $d_temppath)
-                                or error("Cannot open $d_temppath: $!");
-                            while (<$cfh>) {
-                                    s/\r\n/\n/ unless $CONF{dovecot_crlf};
-                                    print $dfh $_
-                                        or error("Cannot write $d_temppath: $!");
-                            }
-                            close($cfh) or error("Cannot close $c_mailpath: $!");
-                            close($dfh) or error("Cannot close $d_temppath: $!");
+				$c_boxpath = "$c_rootdir/$c_box";
+				$d_box =~ s/\//./g;
+				$d_box = ".$d_box";
+			}
 
-                            #
-                            # Create the Maildir++ e-mail filename.  Include the
-                            # size fields used by Dovecot:
-                            #
-                            # | ,S=<size>: <size> contains the file size.  Getting
-                            # | the size from the filename avoids doing a stat(),
-                            # | which may improve the performance.  This is
-                            # | especially useful with Maildir++ quota.
-                            # |
-                            # | ,W=<vsize>: <vsize> contains the file's RFC822.SIZE,
-                            # | i.e. the file size with linefeeds being CR+LF
-                            # | characters.  If the message was stored with CR+LF
-                            # | linefeeds, <size> and <vsize> are the same.  Setting
-                            # | this may give a small speedup because now Dovecot
-                            # | doesn't need to calculate the size itself.
-                            #
-                            # [ http://wiki.dovecot.org/MailboxFormat/Maildir ]
-                            #
-                            my @c_stat = stat($c_mailpath);
-                            my @d_stat = stat($d_temppath);
+			# Edit the Maildir++ folder name if desired.
+			foreach my $operation (@{ $CONF{edit_foldernames} }) {
+				debug("Editing folder name $d_box: $operation");
+				my $r = eval("\$d_box =~ $operation");
+				error("Cannot evaluate $operation: $@") if $@;
+				error("Cannot evaluate $operation.") if not defined($r);
+				debug('New folder name:', $d_box);
+			}
 
-                            error('Cannot stat(2) message file:', $c_mailpath)
-                                if not defined($c_stat[7]);
-                            error('Cannot stat(2) message file:', $d_temppath)
-                                if not defined($d_stat[7]);
+			$d_boxpath = ($d_box eq 'INBOX') ?
+			    $d_rootdir : "$d_rootdir/$d_box";
 
-                            my $size = $d_stat[7];	# File size with LF.
-                            my $vsize = $c_stat[7];	# File size with CR+LF.
-                            my $subdir = ($uid > $box->{nonrecent}) ? 'new' : 'cur';
-                            my $d_mail = _d_create_filename($attr, $size, $vsize,
-                                $#{ $box->{keywords} });
-                            my $d_mailpath = "$d_boxpath/$subdir/$d_mail";
+			# Create an empty Maildir.
+			debug('New folder name:', $d_boxpath);
+			_d_make_maildir($d_boxpath);
+			_d_touch_maildirfolder($d_boxpath) unless $d_box eq 'INBOX';
 
-                            error("Cannot rename $d_temppath to: $d_mailpath")
-                                if not rename($d_temppath, $d_mailpath);
+			my $box = $meta->{box}->{$c_box};
+			my $uidfile = "$d_boxpath/dovecot-uidlist";
 
-                            # Set the e-mail's last access and modification times.
-                            utime($attr->{internaldate}, $attr->{internaldate},
-                                $d_mailpath);
+			# Open the dovecot-uidlist file.
+			open(my $ufh, '>', $uidfile)
+			    or error("Cannot open $uidfile: $!");
 
-                            # Add the e-mail to the dovecot-uidlist.
-                            if ($CONF{dovecot_uidlist_format} == 1) {
-                                    print $ufh "$uid $d_mail\n"
-                                        or error("Cannot write $uidfile: $!");
-                            } elsif ($CONF{dovecot_uidlist_format} == 3) {
-                                    print $ufh "$uid :$d_mail\n"
-                                        or error("Cannot write $uidfile: $!");
-                            } else {
-                                    error('Unknown dovecot-uidlist format:',
-                                        $CONF{dovecot_uidlist_format});
-                            }
-                            $SIZE += $size;
-                            $MAILS++;
-                        }
+			# Write the dovecot-uidlist header line.
+			if ($CONF{dovecot_uidlist_format} == 1) {
+				print $ufh "1 $box->{uidvalidity} $box->{uidnext}\n"
+				    or error("Cannot write $uidfile: $!");
+			} elsif ($CONF{dovecot_uidlist_format} == 3) {
+				print $ufh "3 V$box->{uidvalidity} N$box->{uidnext}\n"
+				    or error("Cannot write $uidfile: $!");
+			} else {
+				error('Unknown dovecot-uidlist format:',
+				    $CONF{dovecot_uidlist_format});
+			}
+
+			# Handle all e-mails in this folder.
+			foreach my $uid (sort {$a <=> $b} keys %{ $box->{mail} }) {
+				my $c_mailpath = "$c_boxpath/$uid.";
+				my $d_temppath = "$d_boxpath/tmp/$MYSELF.$$.$MAILS";
+
+				my $attr = $box->{mail}->{$uid};
+				if ($attr->{expunged}) {
+					debug("$c_mailpath is expunged");
+					$EXPUNGED++;
+				} else {
+				    # Convert the e-mail.
+				    open(my $cfh, '<', $c_mailpath)
+					or error("Cannot open $c_mailpath: $!");
+				    open(my $dfh, '>', $d_temppath)
+					or error("Cannot open $d_temppath: $!");
+				    while (<$cfh>) {
+					    s/\r\n/\n/ unless $CONF{dovecot_crlf};
+					    print $dfh $_
+						or error("Cannot write $d_temppath: $!");
+				    }
+				    close($cfh) or error("Cannot close $c_mailpath: $!");
+				    close($dfh) or error("Cannot close $d_temppath: $!");
+
+				    #
+				    # Create the Maildir++ e-mail filename.  Include the
+				    # size fields used by Dovecot:
+				    #
+				    # | ,S=<size>: <size> contains the file size.  Getting
+				    # | the size from the filename avoids doing a stat(),
+				    # | which may improve the performance.  This is
+				    # | especially useful with Maildir++ quota.
+				    # |
+				    # | ,W=<vsize>: <vsize> contains the file's RFC822.SIZE,
+				    # | i.e. the file size with linefeeds being CR+LF
+				    # | characters.  If the message was stored with CR+LF
+				    # | linefeeds, <size> and <vsize> are the same.  Setting
+				    # | this may give a small speedup because now Dovecot
+				    # | doesn't need to calculate the size itself.
+				    #
+				    # [ http://wiki.dovecot.org/MailboxFormat/Maildir ]
+				    #
+				    my @c_stat = stat($c_mailpath);
+				    my @d_stat = stat($d_temppath);
+
+				    error('Cannot stat(2) message file:', $c_mailpath)
+					if not defined($c_stat[7]);
+				    error('Cannot stat(2) message file:', $d_temppath)
+					if not defined($d_stat[7]);
+
+				    my $size = $d_stat[7];	# File size with LF.
+				    my $vsize = $c_stat[7];	# File size with CR+LF.
+				    my $subdir = ($uid > $box->{nonrecent}) ? 'new' : 'cur';
+				    my $d_mail = _d_create_filename($attr, $size, $vsize,
+					$#{ $box->{keywords} });
+				    my $d_mailpath = "$d_boxpath/$subdir/$d_mail";
+
+				    error("Cannot rename $d_temppath to: $d_mailpath")
+					if not rename($d_temppath, $d_mailpath);
+
+				    # Set the e-mail's last access and modification times.
+				    utime($attr->{internaldate}, $attr->{internaldate},
+					$d_mailpath);
+
+				    # Add the e-mail to the dovecot-uidlist.
+				    if ($CONF{dovecot_uidlist_format} == 1) {
+					    print $ufh "$uid $d_mail\n"
+						or error("Cannot write $uidfile: $!");
+				    } elsif ($CONF{dovecot_uidlist_format} == 3) {
+					    print $ufh "$uid :$d_mail\n"
+						or error("Cannot write $uidfile: $!");
+				    } else {
+					    error('Unknown dovecot-uidlist format:',
+						$CONF{dovecot_uidlist_format});
+				    }
+				    $SIZE += $size;
+				    $MAILS++;
+				}
+			}
+			close($ufh) or error("Cannot close $uidfile: $!");
+			_d_write_keywords($box->{keywords}, $d_boxpath);
+			$FOLDERS++;
 		}
-		close($ufh) or error("Cannot close $uidfile: $!");
-		_d_write_keywords($box->{keywords}, $d_boxpath);
-		$FOLDERS++;
+		_d_write_subscriptions($meta->{subscriptions}, $d_rootdir);
 	}
-	_d_write_subscriptions($meta->{subscriptions}, $d_rootdir);
 	_d_write_sieve($meta->{sieve}, $d_rootdir)
 		if($meta->{sieve});
-	_d_write_maildirsize($d_rootdir, $meta->{quota}) if $meta->{quota};
+	if (!$sieve_only)
+	{
+		_d_write_maildirsize($d_rootdir, $meta->{quota}) if $meta->{quota};
+	}
 	debug('Done writing Dovecot folders.');
 }
 
@@ -1409,6 +1431,7 @@ sub _d_write_sieve ($$) {
 	
 	#make sure sieve dirs exists
 	unless(-d "$rootdir/sieve"){
+		debug("Creating sieve folder $rootdir/sieve");
  	   mkdir("$rootdir/sieve") or die;
 	}
 	unless(-d "$rootdir/sieve/tmp"){
@@ -1625,6 +1648,12 @@ Use this I<PATH> to the I<user>'s seen database file in Cyrus.  If
 F<cyrus.seen> is specified as the I<PATH>, B<cyrus2dovecot> expects an
 old-style F<cyrus.seen> file in every Cyrus folder.
 
+=item B<--sieve-only
+
+Use this to only migrate sieve rules. No messages or quota are migrated.
+Can be used when the messages have been migrated with another tool.
+For example dsync or similar.
+
 =item B<-U>, B<--cyrus-sub=>I<PATH>
 
 Use this I<PATH> to the I<user>'s subscription database file in
@@ -1812,3 +1841,6 @@ FITNESS FOR A PARTICULAR PURPOSE.
 
 	Revision 1.7 2015/01/15 10:54:00 a-schild
 	allow ^ characters in domain user names be remapped to the normal dot
+
+	Revision 1.8 2016/06/24 10:54:00 a-schild
+	Added --sieve-only argument to only migrate sieve scripts
