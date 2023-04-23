@@ -1036,7 +1036,12 @@ sub _c_read_legacy_quota ($) {
 	chomp(@quota);
 
 	error("Cannot parse $file: Not in legacy quota format")
-	    if (@quota != 2 or $quota[1] !~ /^\d+$/);
+		if (@quota != 2 or $quota[1] !~ /^\d+|\-1$/);
+	if ($quota[1] == -1) {
+		info("Skipped quota file because quota is disabled (-1)");
+		return undef;
+	}
+
 	debug('Done reading:', $file);
 	return $quota[1];
 }
