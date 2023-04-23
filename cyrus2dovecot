@@ -9,6 +9,7 @@
 #
 # Edited by Alex @ Gosign
 # Edited by Andre @ Schild.ws
+# Edited by lab-at-nohl @ nohl.eu
 #
 # ------------------------------------------------------------------------------
 # Copyright (c) 2008 Freie Universitaet Berlin.
@@ -78,7 +79,10 @@ my %DEFAULT = (
 #
 #    	$meta->{subscriptions} = [ 'ac', 'ac/dc' ]
 #    	     ->{quota} = 2147483648
-#	     ->{sieve} = <text>
+#	     ->{sieve}->{'activescript1.bc'} = <unsupported copiled script>
+#                     ->{'activescript1.script'} <text>
+#                     ->{'furtherscript2.script'} = <text>
+#	              ->{default_sieve_bcscript} = <link target for active script>
 #    	     ->{box}->{'INBOX'}->{uidvalidity} = 1107601073
 #    	                       ->{uidnext} = 3
 #    	                       ->{nonrecent} = 2	# Last non-recent UID.
@@ -269,7 +273,7 @@ sub main () {
 
 		# Do the actual conversion.
 		c_read_mailbox($meta, $user, $cyrus_inbox, $cyrus_seen,
-		    $cyrus_sub, $cyrus_quota,$cyrus_sieve, $sieve_only);
+		    $cyrus_sub, $cyrus_quota, $cyrus_sieve, $sieve_only);
 		
 		debug('Cyrus Inbox:',$cyrus_inbox);
 		debug('Dovecot Inbox:',$dovecot_inbox);
@@ -649,7 +653,7 @@ sub c_read_skiplist ($) {
 # structure.  Die on error.
 #
 sub c_read_mailbox ($$$$$$$$) {
-	my ($meta, $user, $rootdir, $seenfile, $subfile, $quotafile, $sievefile, $sieve_only) = @_;
+	my ($meta, $user, $rootdir, $seenfile, $subfile, $quotafile, $sievedir, $sieve_only) = @_;
 	my (%existing, @subscriptions);
 	if (!$sieve_only)
 	{
@@ -721,12 +725,35 @@ sub c_read_mailbox ($$$$$$$$) {
 		debug('Quota:', $meta->{quota});
 	}
 	#
-	# Save sieve rules from the specified sieve file
+	# Save sieve rules from the files in $sievedir
 	#
-	if ($sievefile) {
-			$meta->{sieve} = _c_read_sieve($sievefile);
-		warning('No sieve information available.')
-		    if (not $meta->{sieve});
+	warning ("Specified sieve directory does not exist: ", $sievedir)
+		if ($sievedir && ! -e $sievedir);
+	if ($sievedir && -e $sievedir) {
+		$meta->{sieve} = {};
+		opendir(my $handle, $sievedir) or error("Cannot open (compiled) sieve scripts in $sievedir: $!");
+		while (my $file = readdir($handle)) {
+			next if $file !~ /.*\.(bc|script)$/;
+			my ($sieve_basefile) = $file =~ /(.*\.)[^.]+$/;
+			if ("$file" eq $sieve_basefile . "bc") {
+				warning ("Uncompiled sieve script not found, decompile unsopprted: ", $file) 
+					if ( ! -e "$sievedir/$sieve_basefile" . "script" );
+				next;
+			}
+			
+			my $sievefile = "$sievedir/$file";
+
+			$meta->{sieve}->{$file} = _c_read_sieve($sievefile);
+			warning('No sieve information available in ', $sievefile)
+				if (not $meta->{sieve}->{$file});
+		}
+		if (readlink ("$sievedir/defaultbc")) {
+			# obviously, cyrus' defaultbc links to its compiled script, for dovecot its the script file
+			my ($sieve_basefile) = readlink ("$sievedir/defaultbc") =~ /(.*\.)bc$/;
+			$meta->{sieve}->{default_sieve_bcscript} = $sieve_basefile . "script"; #readlink ("$sievedir/defaultbc");
+		}
+		closedir($handle) or error("Cannot close $sievedir: $!");
+		debug('Done with sieve scripts in ', $sievedir);
 	}
 
 	debug('Done reading Cyrus metadata.');
@@ -1061,11 +1088,6 @@ sub _c_read_sieve ($) {
 	open(my $handle, '<', $file) or error("Cannot open $file: $!");
 	my $sieve = join("", <$handle>);
 	close($handle) or error("Cannot close $file: $!");
-#	chomp(@sieve);
-
-#	error("Cannot parse $file: Not in legacy quota format")
-#	    if (@quota != 2 or $quota[1] !~ /^\d+$/);
-#	debug('Done reading:', $file);
 	debug('Done reading:',$file);
 	return $sieve;
 }
@@ -1345,8 +1367,25 @@ sub d_write_mailbox ($$$$) {
 		}
 		_d_write_subscriptions($meta->{subscriptions}, $d_rootdir);
 	}
-	_d_write_sieve($meta->{sieve}, $d_rootdir)
-		if($meta->{sieve});
+	#
+	# Write sieve files
+	#
+	foreach my $sievescript (keys %{ $meta->{sieve} }) {
+		#
+		# Default SIEVE DIRECTORY is besides Maildir, hardcoded: .../user/Maildir -> .../user/sieve
+		#
+		my $sieve_basedir = (basename($d_rootdir) eq "Maildir") ? dirname($d_rootdir) : $d_rootdir;
+		if ("$sievescript" ne "default_sieve_bcscript") {
+			_d_write_sieve($sievescript, $meta->{sieve}->{$sievescript}, $sieve_basedir)
+				if($meta->{sieve}->{$sievescript});
+		} else {
+		        symlink("sieve/$meta->{sieve}->{$sievescript}", "$sieve_basedir/.dovecot.sieve")
+				or warning("Cannot create sieve symlink for sieve file: $sievescript");
+		}
+	}
+	#
+	# Continue with Mailbox
+	#
 	if (!$sieve_only)
 	{
 		_d_write_maildirsize($d_rootdir, $meta->{quota}) if $meta->{quota};
@@ -1431,26 +1470,22 @@ sub _d_write_subscriptions ($$) {
 # Write the sieve file.  Die on error.
 #
 sub _d_write_sieve ($$) {
-	my ($sieve, $rootdir) = @_;
-	my $file = "$rootdir/sieve/phpscript.sieve";
-	
+	my ($file, $sieve, $rootdir) = @_;
+
 	#make sure sieve dirs exists
 	unless(-d "$rootdir/sieve"){
 		debug("Creating sieve folder $rootdir/sieve");
- 	   mkdir("$rootdir/sieve") or die;
+		mkdir("$rootdir/sieve") or die;
 	}
 	unless(-d "$rootdir/sieve/tmp"){
- 	   mkdir("$rootdir/sieve/tmp") or die;
+		mkdir("$rootdir/sieve/tmp") or die;
 	}
 
-	debug('Writing:', $file);
-	open(my $handle, '>', $file) or error("Cannot open $file: $!");
+	open(my $handle, '>', "$rootdir/sieve/$file") or error("Cannot open $file: $!");
 		print $handle "$sieve"
-		    or error("Cannot write $file: $!");
-		debug('Sieve written:', $sieve);
+			or error("Cannot write $file: $!");
+	debug('Sieve written:', $sieve);
 	close($handle) or error("Cannot close $file: $!");
-	debug('Done writing:', $file);
-	symlink("sieve/phpscript.sieve","$rootdir/.dovecot.sieve") or error("Cannot create sieve simlink $file: $!");
 }
 
 #
@@ -1514,6 +1549,8 @@ S<[B<-D> I<dovecot-inbox>]>
 S<[B<-E> I<edit-foldernames>]>
 S<[B<-F> I<dovecot-uidlist-format>]>
 S<[B<-H> I<dovecot-host>]>
+S<[B<-I> I<cyrus-sievedir>]>
+S<[B<--sieve-only>]> 
 S<[B<-N> I<default-quota>]>
 S<[B<-O> I<cyrus-quota-format>]>
 S<[B<-Q> I<cyrus-quota>]>
@@ -1652,6 +1689,13 @@ any, will still be printed to the standard error output.
 Use this I<PATH> to the I<user>'s seen database file in Cyrus.  If
 F<cyrus.seen> is specified as the I<PATH>, B<cyrus2dovecot> expects an
 old-style F<cyrus.seen> file in every Cyrus folder.
+
+=item B<-I>, B<--cyrus-sieve=>I<PATH>
+
+Use this I<PATH> to the I<user>'s sieve files. Please note that only
+not compiled scripts (*.script) cwill be migrated. Dovecot's sieve files
+will be placed in basedir/sieve. Requires dovecot config like:
+*sieve = file:~/sieve;active=~/.dovecot.sieve*
 
 =item B<--sieve-only
 
@@ -1849,3 +1893,7 @@ FITNESS FOR A PARTICULAR PURPOSE.
 
 	Revision 1.8 2016/06/24 10:54:00 a-schild
 	Added --sieve-only argument to only migrate sieve scripts
+
+	Revision 1.9 2023/04/21 noon lab-at-anohl
+	Improved sieve migration, support different sieve scripts, re-use their names; 
+	activate/link to former default; warn if only compiled ressources found
