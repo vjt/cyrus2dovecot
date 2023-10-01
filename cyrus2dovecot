@@ -779,8 +779,10 @@ sub _c_read_folders ($$$$) {
 	# user.foo.  While this could be fixed, a Maildir/.INBOX folder could
 	# not be accessed via Dovecot, anyway.
 	#
-	error('Cannot convert non-INBOX folder named INBOX.')
-	    if $box =~ /^$rootdir\/+INBOX$/;
+	if ($box =~ /^$rootdir\/+INBOX$/) {
+		info('Cannot convert non-INBOX folder named INBOX, skipping');
+		return;
+	}
 
 	# Let $box hold the path relative to the root directory (or "INBOX").
 #	$rootdir = quotemeta($rootdir);
